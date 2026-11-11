@@ -1,7 +1,3 @@
-import { initializeApp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
-import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
-import { getFirestore, collection, doc, setDoc, getDocs, deleteDoc } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
-
 const firebaseConfig = {
   apiKey: "AIzaSyBIg-OXBSMExX6Zt1GvqLxkpKODA6GWngY",
   authDomain: "lensshift-1251e.firebaseapp.com",
@@ -12,7 +8,8 @@ const firebaseConfig = {
   measurementId: "G-5EPL914B25"
 };
 
-const fbApp = initializeApp(firebaseConfig);
+// Firebase loads only after the app is on screen, so it never delays the first view
+const FB = "https://www.gstatic.com/firebasejs/11.10.0/";
 
 const LENSES = [
   { id: "white", name: "עובדות", lens: "העדשה הלבנה", color: "var(--white)", sub: "מה אנחנו יודעים בוודאות? מה חסר לנו?",
@@ -37,7 +34,7 @@ const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(
 
 // ---------- storage: localStorage always, Firestore when available ----------
 let challenges = [];
-let cloud = null; // { db, uid }
+let cloud = null; // { uid, fs, ref }
 
 function loadLocal() {
   try { return JSON.parse(localStorage.getItem(LS_KEY)) || []; } catch { return []; }
@@ -49,9 +46,13 @@ function setSync(text) { $sync.textContent = text; }
 
 async function initCloud() {
   try {
+    const [{ initializeApp }, { getAuth, signInAnonymously }, fs] = await Promise.all(
+      ["firebase-app.js", "firebase-auth.js", "firebase-firestore.js"].map(f => import(FB + f)));
+    const fbApp = initializeApp(firebaseConfig);
     const cred = await signInAnonymously(getAuth(fbApp));
-    cloud = { db: getFirestore(fbApp), uid: cred.user.uid };
-    const snap = await getDocs(collection(cloud.db, "users", cloud.uid, "challenges"));
+    const db = fs.getFirestore(fbApp);
+    cloud = { uid: cred.user.uid, fs, ref: id => fs.doc(db, "users", cred.user.uid, "challenges", id) };
+    const snap = await fs.getDocs(fs.collection(db, "users", cloud.uid, "challenges"));
     const remote = snap.docs.map(d => d.data());
     const byId = new Map(challenges.map(c => [c.id, c]));
     remote.forEach(r => { const l = byId.get(r.id); if (!l || (r.updatedAt || 0) > (l.updatedAt || 0)) byId.set(r.id, r); });
@@ -67,7 +68,7 @@ async function initCloud() {
 }
 async function pushCloud(c) {
   if (!cloud) return;
-  try { await setDoc(doc(cloud.db, "users", cloud.uid, "challenges", c.id), c); setSync("☁ נשמר בענן"); }
+  try { await cloud.fs.setDoc(cloud.ref(c.id), c); setSync("☁ נשמר בענן"); }
   catch (e) { console.warn(e); setSync("נשמר במכשיר בלבד"); }
 }
 let timer;
@@ -147,7 +148,7 @@ function renderWorkspace() {
   document.getElementById("delBtn").onclick = async () => {
     if (!confirm("למחוק את האתגר לצמיתות?")) return;
     challenges = challenges.filter(x => x.id !== c.id); saveLocal();
-    if (cloud) try { await deleteDoc(doc(cloud.db, "users", cloud.uid, "challenges", c.id)); } catch {}
+    if (cloud) try { await cloud.fs.deleteDoc(cloud.ref(c.id)); } catch {}
     state.current = null; render();
   };
   if (state.lens === "summary") {
@@ -162,7 +163,9 @@ function renderWorkspace() {
       at >= 0 ? stars.splice(at, 1) : stars.push(text);
       persist(c); renderWorkspace();
     });
-    document.getElementById("printBtn").onclick = () => print();
+    const pdfBtn = document.getElementById("pdfBtn");
+    pdfBtn.onclick = () => sharePdf(c, pdfBtn);
+    loadPdfLibs().catch(() => {}); // warm up so the share sheet opens quickly after the tap
     return;
   }
   const note = document.getElementById("note");
@@ -206,7 +209,87 @@ function summaryHtml(c) {
     <div class="closing"><h3>לסיום</h3>
       ${CLOSING.map(([k, q]) => `<label for="close-${k}">${q}</label><textarea id="close-${k}" data-close="${k}">${esc(closing[k] || "")}</textarea>`).join("")}
     </div>
-    <div class="row no-print"><button class="btn" id="printBtn">הדפסה / PDF</button></div></section>`;
+    <div class="row no-print"><button class="btn" id="pdfBtn" data-label="${PDF_LABEL}">${PDF_LABEL}</button></div></section>`;
+}
+
+// ---------- share the summary as a PDF ----------
+// The summary is laid out in an off-screen A4-width page, captured as an image (keeps Hebrew RTL intact) and split into PDF pages
+const canShareFiles = !!navigator.canShare?.({ files: [new File(["x"], "x.pdf", { type: "application/pdf" })] });
+const PDF_LABEL = canShareFiles ? "📤 שיתוף כ-PDF" : "⬇ הורדת PDF";
+const loadScript = src => new Promise((res, rej) => document.head.append(Object.assign(document.createElement("script"), { src, onload: res, onerror: rej })));
+let pdfLibs;
+const loadPdfLibs = () => pdfLibs ||= Promise.all([
+  loadScript("https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"),
+  loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js")
+]).catch(e => { pdfLibs = null; throw e; });
+
+function reportHtml(c) {
+  const dot = l => `<i style="--c:${l.color}"${l.id === "white" ? " data-white" : ""}></i>`;
+  const closing = closingOf(c);
+  const answered = CLOSING.filter(([k]) => closing[k]?.trim());
+  const starred = LENSES.flatMap(l => (c.lenses[l.id] || []).filter(x => isStarred(c, l.id, x)).map(x => ({ l, x })));
+  return `<div class="r-head"><span class="r-dots">${LENSES.map(dot).join("")}</span><b>LensShift</b><span class="r-date">${new Date().toLocaleDateString("he-IL")}</span></div>
+    <h1>${esc(c.title)}</h1>${c.description ? `<p class="r-desc">${esc(c.description)}</p>` : ""}
+    ${starred.length ? `<section class="r-sec r-block r-hl"><h3>⭐ מה בלט</h3><ul>${starred.map(({ l, x }) => `<li class="r-block">${dot(l)}${esc(x)}</li>`).join("")}</ul></section>` : ""}
+    ${LENSES.filter(l => (c.lenses[l.id] || []).length).map(l => `<section class="r-sec r-block"><h3>${dot(l)}${l.name}</h3><ul>${c.lenses[l.id].map(x =>
+      `<li class="r-block">${isStarred(c, l.id, x) ? `<span class="r-star">★</span> ` : ""}${esc(x)}</li>`).join("")}</ul></section>`).join("")}
+    ${answered.length ? `<section class="r-sec r-block"><h3>לסיום</h3>${answered.map(([k, q]) => `<div class="r-q r-block"><b>${q}</b><p>${esc(closing[k])}</p></div>`).join("")}</section>` : ""}
+    <p class="r-credit r-block">שש העדשות מבוססות על שיטת "ששת כובעי החשיבה" של ד"ר אדוארד דה בונו · lensshift-1251e.web.app</p>`;
+}
+
+async function makePdf(c) {
+  await loadPdfLibs();
+  await document.fonts.ready;
+  const el = Object.assign(document.createElement("div"), { className: "report", innerHTML: reportHtml(c) });
+  document.body.append(el);
+  try {
+    // Push any block that would straddle a page break down to the next page
+    const PAGE = 1123, M = 48; // A4 height at 794px width, page margin
+    for (const b of el.querySelectorAll(".r-block")) {
+      const top = b.offsetTop, h = b.offsetHeight;
+      if (h > PAGE - 2 * M) continue;
+      const end = (Math.floor(top / PAGE) + 1) * PAGE - M;
+      if (top + h > end) b.style.marginTop = `${parseFloat(getComputedStyle(b).marginTop) + end + 2 * M - top}px`;
+    }
+    const canvas = await html2canvas(el, { scale: 2, backgroundColor: "#ffffff" });
+    const ratio = canvas.width / el.offsetWidth, slicePx = Math.round(PAGE * ratio);
+    const pdf = new window.jspdf.jsPDF({ unit: "pt", format: "a4" });
+    const pw = pdf.internal.pageSize.getWidth(), ph = pdf.internal.pageSize.getHeight();
+    for (let y = 0, i = 0; y < canvas.height; y += slicePx, i++) {
+      const sh = Math.min(slicePx, canvas.height - y);
+      const slice = Object.assign(document.createElement("canvas"), { width: canvas.width, height: slicePx });
+      const ctx = slice.getContext("2d");
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, slice.width, slice.height);
+      ctx.drawImage(canvas, 0, y, canvas.width, sh, 0, 0, canvas.width, sh);
+      if (i) pdf.addPage();
+      pdf.addImage(slice.toDataURL("image/jpeg", .92), "JPEG", 0, 0, pw, ph);
+    }
+    const name = `LensShift - ${c.title.replace(/[\\/:*?"<>|]+/g, " ").slice(0, 60).trim()}.pdf`;
+    return new File([pdf.output("blob")], name, { type: "application/pdf" });
+  } finally { el.remove(); }
+}
+
+function downloadFile(file) {
+  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(file), download: file.name });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+async function sharePdf(c, btn) {
+  btn.disabled = true;
+  let file = btn.file;
+  try {
+    if (!file) { btn.textContent = "מכינים PDF…"; file = await makePdf(c); }
+    btn.file = null;
+    btn.textContent = btn.dataset.label;
+    if (!canShareFiles) return downloadFile(file);
+    await navigator.share({ files: [file], title: `LensShift · ${c.title}` });
+  } catch (e) {
+    if (e.name === "NotAllowedError" && file) {
+      // Preparing took longer than the browser allows after a tap; the next tap shares the ready file
+      btn.file = file; btn.textContent = "📤 הקובץ מוכן – לחצו לשליחה";
+    } else if (e.name !== "AbortError") { console.warn(e); btn.textContent = "משהו השתבש, נסו שוב"; }
+  } finally { btn.disabled = false; }
 }
 
 document.getElementById("homeBtn").onclick = () => { state.current = null; render(); };
