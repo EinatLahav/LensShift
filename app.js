@@ -122,6 +122,7 @@ function renderWorkspace() {
   const lens = LENSES.find(l => l.id === state.lens) || LENSES[0];
   const notes = c.lenses[lens.id] || [];
   $app.innerHTML = `
+    <button class="back no-print" type="button" id="backBtn">→ לכל האתגרים</button>
     <div class="challenge-bar">האתגר: <b>${esc(c.title)}</b>${c.description ? ` · ${esc(c.description)}` : ""}</div>
     <div class="tabs" role="tablist">
       ${LENSES.map(l => `<button class="tab" role="tab" aria-selected="${l.id === state.lens}" data-lens="${l.id}" style="--c:${l.color}">
@@ -141,6 +142,7 @@ function renderWorkspace() {
     </section>`}
     <div class="row no-print"><button class="btn ghost" id="delBtn">מחיקת האתגר</button></div>`;
 
+  document.getElementById("backBtn").onclick = () => { state.current = null; render(); window.scrollTo(0, 0); };
   $app.querySelectorAll(".tab").forEach(t => t.onclick = () => { state.lens = t.dataset.lens; renderWorkspace(); });
   document.getElementById("delBtn").onclick = async () => {
     if (!confirm("למחוק את האתגר לצמיתות?")) return;
@@ -149,8 +151,17 @@ function renderWorkspace() {
     state.current = null; render();
   };
   if (state.lens === "summary") {
-    const d = document.getElementById("decision");
-    d.oninput = () => { c.decision = d.value; persist(c); };
+    $app.querySelectorAll("[data-close]").forEach(t => t.oninput = () => {
+      c.closing = closingOf(c);
+      c.closing[t.dataset.close] = t.value; persist(c);
+    });
+    $app.querySelectorAll("[data-star]").forEach(b => b.onclick = () => {
+      const id = b.dataset.star, text = c.lenses[id][+b.dataset.i];
+      const stars = ((c.stars ||= {})[id] ||= []);
+      const at = stars.indexOf(text);
+      at >= 0 ? stars.splice(at, 1) : stars.push(text);
+      persist(c); renderWorkspace();
+    });
     document.getElementById("printBtn").onclick = () => print();
     return;
   }
@@ -164,18 +175,37 @@ function renderWorkspace() {
   note.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); add(); } };
   $app.querySelectorAll(".chip").forEach(ch => ch.onclick = () => { note.placeholder = ch.textContent; note.focus(); });
   $app.querySelectorAll("[data-del]").forEach(b => b.onclick = () => {
-    c.lenses[lens.id].splice(+b.dataset.del, 1); persist(c); renderWorkspace();
+    const [gone] = c.lenses[lens.id].splice(+b.dataset.del, 1);
+    const stars = c.stars?.[lens.id];
+    const at = stars && !c.lenses[lens.id].includes(gone) ? stars.indexOf(gone) : -1;
+    if (at >= 0) stars.splice(at, 1);
+    persist(c); renderWorkspace();
   });
 }
 
+const CLOSING = [["understand", "מה אני מבין/ה עכשיו יותר?"], ["remember", "מה הכי חשוב לי לזכור?"], ["next", "מה הצעד הבא?"]];
+// Older challenges kept a single "decision" field; it carries over as the next step
+const closingOf = c => c.closing || (c.decision ? { next: c.decision } : {});
+const isStarred = (c, lensId, text) => (c.stars?.[lensId] || []).includes(text);
+
 function summaryHtml(c) {
+  const dot = l => `<i${l.id === "white" ? " data-white" : ""}></i>`;
+  const starred = LENSES.flatMap(l => (c.lenses[l.id] || []).filter(x => isStarred(c, l.id, x)).map(x => ({ l, x })));
+  const highlights = `<div class="highlights"><h3>⭐ מה בלט</h3>${starred.length
+    ? `<ul class="hl">${starred.map(({ l, x }) => `<li style="--c:${l.color}">${dot(l)}<span>${esc(x)}</span></li>`).join("")}</ul>`
+    : `<small>סמנו 2–4 מחשבות שהפתיעו, נגעו או שינו לכם את התמונה.</small>`}</div>`;
   const body = LENSES.map(l => {
     const n = c.lenses[l.id] || [];
-    return `<h3 style="--c:${l.color}"><i${l.id === "white" ? " data-white" : ""}></i>${l.name}</h3>${n.length ? `<ul>${n.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : `<small style="color:var(--soft)">עוד לא נחקר</small>`}`;
+    return `<h3 style="--c:${l.color}">${dot(l)}${l.name}</h3>${n.length ? `<ul class="snotes">${n.map((x, i) => {
+      const on = isStarred(c, l.id, x);
+      return `<li><button class="star${on ? " on" : ""}" type="button" data-star="${l.id}" data-i="${i}" aria-pressed="${on}" aria-label="סימון בכוכב">${on ? "★" : ""}</button><span>${esc(x)}</span></li>`;
+    }).join("")}</ul>` : `<small style="color:var(--soft)">עוד לא נחקר</small>`}`;
   }).join("");
-  return `<section class="card summary"><h2 style="margin:0">הסיכום שלי</h2>${body}
-    <label for="decision">מסקנה / החלטה / הצעד הבא</label>
-    <textarea id="decision" placeholder="מה אני לוקח/ת מכל זה?">${esc(c.decision || "")}</textarea>
+  const closing = closingOf(c);
+  return `<section class="card summary"><h2 style="margin:0">הסיכום שלי</h2>${highlights}${body}
+    <div class="closing"><h3>לסיום</h3>
+      ${CLOSING.map(([k, q]) => `<label for="close-${k}">${q}</label><textarea id="close-${k}" data-close="${k}">${esc(closing[k] || "")}</textarea>`).join("")}
+    </div>
     <div class="row no-print"><button class="btn" id="printBtn">הדפסה / PDF</button></div></section>`;
 }
 
